@@ -270,13 +270,10 @@ function sendFragmentedFile(response, filename, params) {
 		// Sending the last chunk in the current segment
 		|| (!params.checkEndOfSegment && params.endOfSegmentFound == true && params.nbMdatInSegment > 0)) {
 
-		console.log("checkEndOfSegment: " + params.checkEndOfSegment + " endOfSegmentFound: " + params.endOfSegmentFound + " nbMdatInSegment: " + params.nbMdatInSegment);
-
 		if (!params.checkEndOfSegment && params.endOfSegmentFound == true && params.nbMdatInSegment > 0)
 		{
 			params.nbMdatInSegment = 0;
 			endReached = true;
-			console.log("set endReached");
 		}
 
 		params.fd = fs.openSync(filename, 'r');
@@ -298,11 +295,9 @@ function sendFragmentedFile(response, filename, params) {
 			   make sure we have at least 8 bytes to read box length and box code, 
 			   otherwise we need to wait for the next read */
 			boxReadingStatus = readFromBufferAndSendBoxes(response, params);				
-			console.log("After readFromBufferAndSendBoxes");	
 			
 			if (endReached)
 			{
-                                        console.log("end reached");
                                         reportMessage(logLevels.DEBUG_BASIC, "end reached");
                                         if (use_watchFile) {
                                                 fs.unwatchFile(filename, params.listener);
@@ -350,7 +345,6 @@ function sendFragmentedFile(response, filename, params) {
 					}
 					break;
 				} else if (boxReadingStatus == "end") {
-                                        console.log("end reached");
                                         reportMessage(logLevels.DEBUG_BASIC, "end reached");
                                         if (use_watchFile) {
                                                 fs.unwatchFile(filename, params.listener);
@@ -408,7 +402,6 @@ function watchFileListener(curr, prev) {
 	var boxReadingStatus;
 
 	let newfilename;
-	console.log("stats: " + curr.ino + " filename: " + this.filename);	
 	if (curr.ino === 0)
 	{
 		let filename_len = this.filename.length;
@@ -420,7 +413,6 @@ function watchFileListener(curr, prev) {
 		newfilename = this.filename;
 	}
 
-	console.log("newfilename: " + newfilename);
 	sendFragmentedFile(this.response, newfilename, this);
 }
 
