@@ -95,7 +95,7 @@ function sendAndUpdateBuffer(response, message, fileData, endpos, noWrite) {
 	var tmpBuffer;
 	fileData.total_sent += endpos;
 	reportMessage(sendMediaSegmentsFragmented ? logLevels.INFO : logLevels.DEBUG_BASIC, 
-		"File "+fileData.filename+", sending "+message+" data from " + fileData.next_byte_to_send + " to " + (endpos - 1) + " in " + (getTime() - response.startTime) + " ms (total_sent: "+fileData.total_sent+") at utc "+ getTime());
+		"sendMediaSegmentsFragmented: " + sendMediaSegmentsFragmented + " File "+fileData.filename+", sending "+message+" data from " + fileData.next_byte_to_send + " to " + (endpos - 1) + " in " + (getTime() - response.startTime) + " ms (total_sent: "+fileData.total_sent+") at utc "+ getTime());
 	tmpBuffer = fileData.buffer.slice(fileData.next_byte_to_send, endpos);
 	if (noWrite) {
 		// patch for Google Chrome not supporting eods boxes
@@ -128,7 +128,7 @@ function readFileIntoBuffer(fileData) {
 	
 	if (offset >= buffer.length) {
 		/* increase the buffer size if we don't have enough to read in */
-		buffer = Buffer.concat( [ buffer, new Buffer(100000) ], buffer.length + 100000);						
+		buffer = Buffer.concat( [ buffer, Buffer.alloc(100000) ], buffer.length + 100000);						
 		fileData.buffer = buffer;
 	}
 
@@ -237,7 +237,7 @@ function readFromBufferAndSendBoxes(response, fileData) {
 }
 
 function Parameters( multipleFiles, initial_state, response, filename) {
-	this.buffer = new Buffer(100000);
+	this.buffer = Buffer.alloc(100000);
 	this.parsing_state = initial_state;
 	this.nb_valid_bytes = 0;
 	this.next_file_position = 0;
@@ -262,9 +262,22 @@ function sendFragmentedFile(response, filename, params) {
 		return;
 	}
 
+	let endReached = false;
+
 	/* In some modes, we don't check for specific end of marker boxes */
 	if (!params.checkEndOfSegment
-		|| (params.checkEndOfSegment && params.endOfSegmentFound == false)) {
+		|| (params.checkEndOfSegment && params.endOfSegmentFound == false)
+		// Sending the last chunk in the current segment
+		|| (!params.checkEndOfSegment && params.endOfSegmentFound == true && params.nbMdatInSegment > 0)) {
+
+		console.log("checkEndOfSegment: " + params.checkEndOfSegment + " endOfSegmentFound: " + params.endOfSegmentFound + " nbMdatInSegment: " + params.nbMdatInSegment);
+
+		if (!params.checkEndOfSegment && params.endOfSegmentFound == true && params.nbMdatInSegment > 0)
+		{
+			params.nbMdatInSegment = 0;
+			endReached = true;
+			console.log("set endReached");
+		}
 
 		params.fd = fs.openSync(filename, 'r');
 		var stats = fs.fstatSync(params.fd);
@@ -284,8 +297,22 @@ function sendFragmentedFile(response, filename, params) {
 			/* Read boxes and send them 
 			   make sure we have at least 8 bytes to read box length and box code, 
 			   otherwise we need to wait for the next read */
-			boxReadingStatus = readFromBufferAndSendBoxes(response, params);					
-							
+			boxReadingStatus = readFromBufferAndSendBoxes(response, params);				
+			console.log("After readFromBufferAndSendBoxes");	
+			
+			if (endReached)
+			{
+                                        console.log("end reached");
+                                        reportMessage(logLevels.DEBUG_BASIC, "end reached");
+                                        if (use_watchFile) {
+                                                fs.unwatchFile(filename, params.listener);
+                                        } else if (params.listener) {
+                                                params.listener.close();
+                                        }
+                                        params.listener = null;
+                                        /* Quit */
+                                        break;
+                        }
 		
 			if (params.next_file_position < file_size) {
 				/* we still have some data to read from the file */
@@ -323,23 +350,26 @@ function sendFragmentedFile(response, filename, params) {
 					}
 					break;
 				} else if (boxReadingStatus == "end") {
-					reportMessage(logLevels.DEBUG_BASIC, "end reached");
-					if (use_watchFile) {
-						fs.unwatchFile(filename, params.listener);
-					} else if (params.listener) {
-						params.listener.close();
-					}
-					params.listener = null;
-					/* Quit */
-					break;
-				}
+                                        console.log("end reached");
+                                        reportMessage(logLevels.DEBUG_BASIC, "end reached");
+                                        if (use_watchFile) {
+                                                fs.unwatchFile(filename, params.listener);
+                                        } else if (params.listener) {
+                                                params.listener.close();
+                                        }
+                                        params.listener = null;
+                                        /* Quit */
+                                        break;
+                                }
 			}
 		}
 		
 		/* mark that the data from this file can be sent the next time its content will be refreshed 
 		  (to send the very latest fragment first) */
 		params.request = true;
-		if (params.endOfSegmentFound) {
+		//if (params.endOfSegmentFound && params.nbMdatInSegment === 0) {
+		if (endReached) {
+			console.log("sending 0-sized chunk");
 			var resTime = getTime() - response.startTime;
 			reportMessage(logLevels.INFO, "end of file reading ("+filename+") in " + resTime + " ms at UTC " + getTime() );
 			params.response.end();
@@ -364,19 +394,34 @@ function sendFragmentedFile(response, filename, params) {
  */
 function watchListener(event, filename) {
 	var boxReadingStatus;
-	
+
 	if (event == 'change') {
 		reportEvent("file", event, filename);
 		sendFragmentedFile(this.response, this.filename, this);
-	} else {
+	}
+	else {
 		reportEvent("file", event, filename);
   }
 }
 
 function watchFileListener(curr, prev) {
 	var boxReadingStatus;
-	
-	sendFragmentedFile(this.response, this.filename, this);
+
+	let newfilename;
+	console.log("stats: " + curr.ino + " filename: " + this.filename);	
+	if (curr.ino === 0)
+	{
+		let filename_len = this.filename.length;
+		newfilename = this.filename.slice(0, filename_len-4); 
+		this.endOfSegmentFound = true;
+	}	
+	else
+	{
+		newfilename = this.filename;
+	}
+
+	console.log("newfilename: " + newfilename);
+	sendFragmentedFile(this.response, newfilename, this);
 }
 
 
@@ -417,11 +462,17 @@ var onRequest = function(req, res) {
 	} 
 	var parsed_url = url_parser.parse(req.url, true);
 	var filename = parsed_url.pathname.slice(1);
+	var ext = parsed_url.pathname.slice(-3); 
 	var time = res.startTime = getTime();
 
 	if (allowCors) {
 		res.setHeader("Access-Control-Allow-Origin", "*");
 		res.setHeader("Access-Control-Expose-Headers", "Date");
+	}
+
+	if (ext === "m4s" && !filename.includes("init"))
+	{
+		filename += ".tmp";
 	}
 
 	// we send the files as they come, except for segments for which we send fragment by fragment
@@ -456,14 +507,12 @@ var onRequest = function(req, res) {
 
 	reportMessage(logLevels.INFO, "Request for file: '" + filename + "' at UTC " + time) ;
 
-	var ext = parsed_url.pathname.slice(-3);
-
 	if (ext === "mpd" || ext === "mp4" || ext === "m4s") {
 		res.statusCode = 200;
 		res.setHeader("Content-Type", mime_types[ext]);
 		res.setHeader("Server-UTC", time);
 		// TODO: Check if we should send MP4 files as fragmented files or not
-		if (ext === "mp4" && sendInitSegmentsFragmented || ext === "m4s" && sendMediaSegmentsFragmented) {
+		if (ext === "mp4" && sendInitSegmentsFragmented || ext === "m4s" && sendMediaSegmentsFragmented && !filename.includes("init")) {
 			var params = new Parameters(false, state.NONE, res, filename);
 			sendFragmentedFile(res, filename, params);
 			// Sending the final 0-size chunk because the file won't change anymore
@@ -471,7 +520,7 @@ var onRequest = function(req, res) {
 				res.end();
 				reportMessage(logLevels.INFO, "file " + filename + " sent in " + (getTime() - time) + " ms");
       		}
-		} else {
+		} else { 
 			sendFile(res, filename);
 		}
 	} else {
