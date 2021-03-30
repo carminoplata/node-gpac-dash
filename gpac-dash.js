@@ -225,8 +225,8 @@ function readFromBufferAndSendBoxes(response, fileData) {
 	case "moof":
 		if (val1 + val2 + val3 + val4 == "mdat") {
 			buffer = sendAndUpdateBuffer(response, "mdat", fileData, fileData.next_box_start);
-			reportMessage(logLevels.DEBUG_BASIC, "File "+fileData.filename+", fragment "+fileData.nbMdatInSegment+" sent at utc "+getTime());
 			fileData.nbMdatInSegment++;
+			//reportMessage(logLevels.INFO, "File "+fileData.filename+", fragment "+fileData.nbMdatInSegment+" sent at utc "+getTime());
 			fileData.parsing_state = state.MOOV;
 		} else {
 			/* wait for another box */
@@ -272,11 +272,22 @@ function sendFragmentedFile(response, filename, params) {
 
 		if (!params.checkEndOfSegment && params.endOfSegmentFound == true && params.nbMdatInSegment > 0)
 		{
-			params.nbMdatInSegment = 0;
+			//params.nbMdatInSegment = 0;
 			endReached = true;
 		}
 
-		params.fd = fs.openSync(filename, 'r');
+		let fn;
+		if (fs.existsSync(filename))
+		{
+			fn = filename;
+		}
+		else
+		{
+        	fn = filename.slice(0, filename.length - 4);
+			console.log("File " + filename + " not found. Try " + fn);
+		}
+
+		params.fd = fs.openSync(fn, 'r');
 		var stats = fs.fstatSync(params.fd);
 		var file_size = stats.size;
 		if (file_size <= params.next_file_position) {
@@ -296,6 +307,7 @@ function sendFragmentedFile(response, filename, params) {
 			   otherwise we need to wait for the next read */
 			boxReadingStatus = readFromBufferAndSendBoxes(response, params);				
 			
+/*
 			if (endReached)
 			{
                                         reportMessage(logLevels.DEBUG_BASIC, "end reached");
@@ -305,9 +317,10 @@ function sendFragmentedFile(response, filename, params) {
                                                 params.listener.close();
                                         }
                                         params.listener = null;
-                                        /* Quit */
+                                        // Quit 
                                         break;
                         }
+*/
 		
 			if (params.next_file_position < file_size) {
 				/* we still have some data to read from the file */
@@ -356,6 +369,23 @@ function sendFragmentedFile(response, filename, params) {
                                         break;
                                 }
 			}
+
+            if (endReached)
+            {
+				params.nbMdatInSegment = 0;
+              	reportMessage(logLevels.DEBUG_BASIC, "end reached");
+               	if (use_watchFile) {
+                 	fs.unwatchFile(filename, params.listener);
+                } 
+				else if (params.listener) {
+                    params.listener.close();
+                }
+
+                params.listener = null;
+               	/* Quit */
+                              
+				break;
+          	}
 		}
 		
 		/* mark that the data from this file can be sent the next time its content will be refreshed 
@@ -368,9 +398,9 @@ function sendFragmentedFile(response, filename, params) {
 			reportMessage(logLevels.INFO, "end of file reading ("+filename+") in " + resTime + " ms at UTC " + getTime() );
 			params.response.end();
 			params.endSent = true;
-			if (params.listener) {
+			/*if (params.listener) {
 				params.listener.close();
-			}
+			}*/
 		}
 		reportMessage(logLevels.DEBUG_MAX, " next file read position: " + params.next_file_position);
 		reportMessage(logLevels.DEBUG_MAX, " buffer size: " + params.buffer.length);
