@@ -19,6 +19,7 @@ function usage() {
 	console.log("-use-watch             uses watch instead of watchFile (default: false)");
 	console.log("-quality-log-file      name of a file in which the latest quality requested is logged (default: no log), experimental");
 	console.log("-incoming-log-file     name of a file in which all requests are logged (default: no log)");
+	console.log("-chunk-count			number of chunks in a segment");
 
 	console.log();
 }
@@ -32,6 +33,7 @@ var port = 8000;
 var quality_log_file = null;
 var incoming_log_file = null;
 var logLevel = 0;
+var chunkCount = 0;
 
 /* Boolean controlling the sending of segments fragment-by-fragment as HTTP chunks, 
    requires MP4Box or DashCast to use -segment-marker eods */
@@ -226,7 +228,7 @@ function readFromBufferAndSendBoxes(response, fileData) {
 		if (val1 + val2 + val3 + val4 == "mdat") {
 			buffer = sendAndUpdateBuffer(response, "mdat", fileData, fileData.next_box_start);
 			fileData.nbMdatInSegment++;
-			//reportMessage(logLevels.INFO, "File "+fileData.filename+", fragment "+fileData.nbMdatInSegment+" sent at utc "+getTime());
+			reportMessage(logLevels.INFO, "File "+fileData.filename+", fragment "+fileData.nbMdatInSegment+" sent at utc "+getTime());
 			fileData.parsing_state = state.MOOV;
 		} else {
 			/* wait for another box */
@@ -269,25 +271,14 @@ function sendFragmentedFile(response, filename, params) {
 		|| (params.checkEndOfSegment && params.endOfSegmentFound == false)
 		// Sending the last chunk in the current segment
 		|| (!params.checkEndOfSegment && params.endOfSegmentFound == true && params.nbMdatInSegment > 0)) {
-
-		if (!params.checkEndOfSegment && params.endOfSegmentFound == true && params.nbMdatInSegment > 0)
+		console.log("endOfSegmentFound: " + params.endOfSegmentFound);
+		if (params.endOfSegmentFound == true && params.nbMdatInSegment > 0)
 		{
-			//params.nbMdatInSegment = 0;
+			console.log("nbMdatInSegment: " + params.nbMdatInSegment);
 			endReached = true;
 		}
 
-		let fn;
-		if (fs.existsSync(filename))
-		{
-			fn = filename;
-		}
-		else
-		{
-        	fn = filename.slice(0, filename.length - 4);
-			console.log("File " + filename + " not found. Try " + fn);
-		}
-
-		params.fd = fs.openSync(fn, 'r');
+		params.fd = fs.openSync(filename, 'r');
 		var stats = fs.fstatSync(params.fd);
 		var file_size = stats.size;
 		if (file_size <= params.next_file_position) {
@@ -307,30 +298,30 @@ function sendFragmentedFile(response, filename, params) {
 			   otherwise we need to wait for the next read */
 			boxReadingStatus = readFromBufferAndSendBoxes(response, params);				
 			
-/*
-			if (endReached)
-			{
-                                        reportMessage(logLevels.DEBUG_BASIC, "end reached");
-                                        if (use_watchFile) {
-                                                fs.unwatchFile(filename, params.listener);
-                                        } else if (params.listener) {
-                                                params.listener.close();
-                                        }
-                                        params.listener = null;
-                                        // Quit 
-                                        break;
-                        }
-*/
-		
 			if (params.next_file_position < file_size) {
+				console.log("we still have some data to read from the file");
 				/* we still have some data to read from the file */
 				continue;
 			} else {
 				/* we have read everything available from the file (for now) */
 				if (boxReadingStatus == "ok") {
+					console.log("we haven't finished reading boxes, keep on reading");
+
+					if (params.nbMdatInSegment == chunkCount)
+					{
+						// When all chunks are read once (player is not requesting the live edge segment
+						// chunk by chunk, but an earlier whole segment), readFromBufferAndSendBoxes 
+						// returns "ok" but we should not wait for more MOOF, but end the current 
+						// segment immediately.
+						params.nbMdatInSegment = 0;
+						endReached = true;
+						break;
+					}
+
 					/* we haven't finished reading boxes, keep on reading */
 					continue;
 				} else if (boxReadingStatus == "not-enough") { 
+					console.log("register watchFileListener 1");
 					/* quit and wait for another file change event */
 					reportMessage(logLevels.DEBUG_BASIC, "Not enough data to read the full box");
 					if (params.listener == null) {
@@ -342,6 +333,7 @@ function sendFragmentedFile(response, filename, params) {
 					}
 					break;
 				} else if (boxReadingStatus == "stop") {
+					console.log("register watchFileListener 2");
 					/* reset the parser, the data written in the file by GPAC/MP4Box is not ready to be read yet
 					   quit and wait for another file change event */
 					reportMessage(logLevels.DEBUG_BASIC, "Resetting parser - GPAC data not ready yet");
@@ -358,6 +350,7 @@ function sendFragmentedFile(response, filename, params) {
 					}
 					break;
 				} else if (boxReadingStatus == "end") {
+										console.log("end reached because boxReadingStatus is end");
                                         reportMessage(logLevels.DEBUG_BASIC, "end reached");
                                         if (use_watchFile) {
                                                 fs.unwatchFile(filename, params.listener);
@@ -373,7 +366,7 @@ function sendFragmentedFile(response, filename, params) {
             if (endReached)
             {
 				params.nbMdatInSegment = 0;
-              	reportMessage(logLevels.DEBUG_BASIC, "end reached");
+              	reportMessage(logLevels.DEBUG_INFO, "end reached");
                	if (use_watchFile) {
                  	fs.unwatchFile(filename, params.listener);
                 } 
@@ -391,7 +384,6 @@ function sendFragmentedFile(response, filename, params) {
 		/* mark that the data from this file can be sent the next time its content will be refreshed 
 		  (to send the very latest fragment first) */
 		params.request = true;
-		//if (params.endOfSegmentFound && params.nbMdatInSegment === 0) {
 		if (endReached) {
 			console.log("sending 0-sized chunk");
 			var resTime = getTime() - response.startTime;
@@ -431,19 +423,13 @@ function watchListener(event, filename) {
 function watchFileListener(curr, prev) {
 	var boxReadingStatus;
 
-	let newfilename;
-	if (curr.ino === 0)
+	console.log("watchFileListener: nbMdatInSegment: " + this.nbMdatInSegment);	
+	if (this.nbMdatInSegment + 1 == chunkCount)
 	{
-		let filename_len = this.filename.length;
-		newfilename = this.filename.slice(0, filename_len-4); 
 		this.endOfSegmentFound = true;
-	}	
-	else
-	{
-		newfilename = this.filename;
 	}
 
-	sendFragmentedFile(this.response, newfilename, this);
+	sendFragmentedFile(this.response, this.filename, this);
 }
 
 
@@ -490,11 +476,6 @@ var onRequest = function(req, res) {
 	if (allowCors) {
 		res.setHeader("Access-Control-Allow-Origin", "*");
 		res.setHeader("Access-Control-Expose-Headers", "Date");
-	}
-
-	if (ext === "m4s" && !filename.includes("init"))
-	{
-		filename += ".tmp";
 	}
 
 	// we send the files as they come, except for segments for which we send fragment by fragment
@@ -587,6 +568,9 @@ process.argv.splice(1).forEach(function(val, index, array) {
 		quality_log_file = array[index + 1];
 	} else if (val === "-incoming-log-file") {
 		incoming_log_file = array[index + 1];
+	} else if (val === "-chunks-per-segment") {
+		chunkCount = array[index + 1];
+		console.log("chunkCount: " + chunkCount);		
 	} else if (val === "-h") {
 		usage();
 		process.exit(-1);
