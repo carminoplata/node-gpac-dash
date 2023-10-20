@@ -1,0 +1,23 @@
+{
+  "name": "server-node-docker",
+  "version": "1.0.0",
+  "description": "Simple Docker Server in Node.js ",
+  "main": "server.js",
+  "scripts": {
+    "debug": "node gpac-dash.js -log info -incoming-log-file server.log -cors",
+    "prod": "node gpac-dash.js -log info -incoming-log-file server.log -cors",
+    "test": "mocha --exit"
+  },
+  "keywords": [
+    "server",
+    "node",
+    "docker"
+  ],
+  "author": "Carmine Sacco",
+  "license": "MIT",
+  "devDependencies": {
+    "chai": "^4.3.7",
+    "mocha": "^10.2.0",
+    "node-mocks-http": "^1.12.2"
+  }
+}

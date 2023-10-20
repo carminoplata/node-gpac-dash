@@ -6,7 +6,7 @@
  ******************************************************************************/
 
 function usage() {
-	console.log("node dash-chunked.js [options]");
+	console.log("node gpac-dash.js [options]");
 	console.log("Basic options");
 	console.log("-h                     displays this message");
 	console.log("-log <level>           sets the log level: info (default) | debug-basic | debug-max");
@@ -24,9 +24,28 @@ function usage() {
 	console.log();
 }
 
+function getNumOfHexDigits(number) {
+	return Math.floor((Math.floor(Math.log2(number) + 1) / 4)+1);
+}
+
+function makeChunk(buffer){
+	let chunk_size = `${buffer.length.toString(16)}\r\n`;
+	let indexToFill = chunk_size.length;
+	// Chunk : chunk_size_length + buffer + \r\n + 3 bytes empty chunk (0\r\n) + 2 bytes (\r\n)
+	let chunk = Buffer.alloc(buffer.length + 7 + indexToFill); 
+	let lastChunk = '\r\n0\r\n\r\n';
+	chunk.set(Buffer.from(chunk_size, 'utf-8')); // start at index 0
+	chunk.set(buffer, indexToFill);
+	indexToFill+= buffer.length;
+	chunk.set(Buffer.from(lastChunk, 'utf-8'), indexToFill);
+	return chunk;
+}
+
 var fs = require('fs');
 var http = require('http');
+var path = require('path');
 var url_parser = require('url');
+const { log } = require('util');
 
 var ipaddr = null;
 var port = 8000;
@@ -42,21 +61,272 @@ var SEGMENT_MARKER = "eods";
 var no_marker_write = false;
 var sendInitSegmentsFragmented = false;
 var allowCors = false;
-
 var use_watchFile = true;
 var watchOptions = { persistent: true, recursive: false };
 var watchFileOptions = { persistent: true, interval: 10 };
 
+var retrieveStreaming = function(req){
+	return new Promise((resolve, reject) => {
+		var useIndex = false;
+		var notFound = false;
+		var fStat;
+		var parsed_url = url_parser.parse(req.url, true);
+		var filename = "data"+parsed_url.pathname;
+
+		let ext; 
+		let buffer;
+		let result;
+		if (incoming_log_file) {
+			let recordLog = `Incoming request from ${req.socket.remoteAddress} for URL: ${req.url}
+							 with headers: ${JSON.stringify(req.headers)}\n`;
+			reportMessage(logLevels.INFO, recordLog);
+		}
+		if (quality_log_file) {
+			fs.writeFile(quality_log_file, req.url);	
+		}
+		// we send the files as they come, except for segments for which we send fragment by fragment
+		if (filename === "") {
+			filename = "./";
+		}
+		try {	
+			fStat = fs.statSync(filename);
+		} catch(e) {
+			notFound = true;
+		}
+		if (notFound || !fStat.isFile()) {
+			if (fStat && fStat.isDirectory()) {
+				var fIndexStat;
+				try {	
+					fIndexStat = fs.statSync(filename+require('path').sep+'index.html');
+				} catch (e) {
+					notFound = true;
+				}
+				if (fIndexStat) {
+					notFound = false;
+					useIndex = true;
+				}
+			} 
+			if (notFound) {
+				reportMessage(logLevels.INFO, "Request for non existing file: '" + filename);
+				reject(404);
+			}
+		}else if(req.method == 'OPTIONS')
+		{
+			reportMessage(logLevels.INFO, "Request to access file: '" + filename);
+			result = {code: 200, buffer:[]}
+			resolve(result);
+		}
+		reportMessage(logLevels.INFO, "Request for file: '" + filename);
+		if (parsed_url.pathname.endsWith('m3u8'))
+		{
+			ext = parsed_url.pathname.slice(-4);
+		}else if(parsed_url.pathname.endsWith('mp4') || 
+				 parsed_url.pathname.endsWith('m4s') ||
+				 parsed_url.pathname.endsWith('mpd')){
+		    ext = parsed_url.pathname.slice(-3);
+		}else if(parsed_url.pathname.endsWith('ts')){
+			ext = parsed_url.pathname.slice(-2);
+		}
+		if (ext in mime_types ) {
+			// Retrieves full file
+			buffer = sendFile(filename);
+			/*if(ext == 'mp4' || ext =='m4s')
+			{
+				// HTTP 1.1 Chunks is {chunk_size}\r\n{chunk_data}\r\n0\r\n
+				//result = {code: 200, ext: mime_types[ext], buffer: makeChunk(buffer)};
+				result = {code: 200, ext: mime_types[ext], buffer: buffer};
+			}else{
+				result = {code: 200, ext: mime_types[ext], buffer: buffer};
+			}*/
+			result = {code: 200, ext: mime_types[ext], buffer: buffer};
+			reportMessage(logLevels.INFO, `Sending File ${filename} with ${result.buffer.length} bytes`);
+			resolve(result);
+			/*if(ext != 'm4s' && ext != 'mp4'){
+				
+			}else
+			{
+				var params = new Parameters(false, state.NONE, res, filename);
+			}*/
+			
+			// TODO: Check if we should send MP4 files as fragmented files or not
+			/*if (ext === "mp4" && sendInitSegmentsFragmented || ext === "m4s" && sendMediaSegmentsFragmented && !filename.includes("init")) {
+				var params = new Parameters(false, state.NONE, res, filename);
+				sendFragmentedFile(res, filename, params);
+				// Sending the final 0-size chunk because the file won't change anymore
+				  if (ext === "mp4") {
+					res.end();
+					reportMessage(logLevels.INFO, "file " + filename + " sent in " + (getTime() - time) + " ms");
+				  }
+			} else { 
+				sendFile(res, filename);
+			}*/
+		}else{
+			reportMessage(logLevels.INFO, `Error Segment with ${ext} format doesn't exist`);
+			reject(400);	
+		}
+	});
+	
+	
+	
+
+	// we send the files as they come, except for segments for which we send fragment by fragment
+	/*if (filename === "") {
+		filename = "./";
+	}
+	try {	
+		fStat = fs.statSync(filename);
+	} catch(e) {
+		notFound = true;
+	}
+	if (notFound || !fStat.isFile()) {
+		if (fStat && fStat.isDirectory()) {
+			var fIndexStat;
+			try {	
+				fIndexStat = fs.statSync(filename+require('path').sep+'index.html');
+			} catch (e) {
+				notFound = true;
+			}
+			if (fIndexStat) {
+				notFound = false;
+				useIndex = true;
+			}
+		} 
+		if (notFound) {
+			reportMessage(logLevels.INFO, "Request for non existing file: '" + filename + "' at UTC " + time);
+			
+			return;
+		}
+	}else if(req.method == 'OPTIONS')
+	{
+		reportMessage(logLevels.INFO, "Request to access file: '" + filename + "' at UTC " + time);
+		res.statusCode = 200;
+		res.setHeader("Allow", "OPTIONS, GET");
+		res.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
+		res.end();
+		return;
+	}
+	reportMessage(logLevels.INFO, "Request for file: '" + filename + "' at UTC " + time) ;
+	
+	if (ext === "mpd" || ext === "mp4" || ext === "m4s" || ext === "m3u8" ) {
+		res.statusCode = 200;
+		res.setHeader("Content-Type", mime_types[ext]);
+		res.setHeader("Allow", time);
+		// TODO: Check if we should send MP4 files as fragmented files or not
+		if (ext === "mp4" && sendInitSegmentsFragmented || ext === "m4s" && sendMediaSegmentsFragmented && !filename.includes("init")) {
+			var params = new Parameters(false, state.NONE, res, filename);
+			sendFragmentedFile(res, filename, params);
+			// Sending the final 0-size chunk because the file won't change anymore
+      		if (ext === "mp4") {
+				res.end();
+				reportMessage(logLevels.INFO, "file " + filename + " sent in " + (getTime() - time) + " ms");
+      		}
+		} else { 
+			sendFile(res, filename);
+		}
+	} else {
+		if (useIndex) {
+			sendFile(res, filename+require('path').sep+'index.html');
+		} else {		
+			sendFile(res, filename);
+		}
+	}*/
+}
+
+var retrieveSegmentFile = function(filename){
+	var params = new Parameters(false, state.NONE, res, filename);
+	sendFragmentedFile(res, filename, params);
+}
+
+var storeStreaming = function(req, content){
+
+	return new Promise((resolve, reject) => {
+		if (content.length <= 0)
+		{
+			reportMessage(`Received Empty chunk ${req.url}`)
+			reject('Received empty file');
+		}else{
+			let flags = (req.url.endsWith('m3u8')|| req.url.endsWith('mpd')) ? {flags:'w'} : {flags:'a'};
+			if(fs.existsSync("data"+req.url) && flags.flags=='a'){
+				reportMessage(logLevel, `Add ${content.length} bytes at ${req.url}`);
+			}else{
+				reportMessage(logLevel, `Write Segment ${req.url} with ${content.length} bytes`);
+			}
+			let ws = fs.createWriteStream("data"+req.url, flags);
+		    ws.write(content);
+			ws.on('error', function(err){
+				reportMessage(logLevel, `Error on writing file: ${err}`);
+				reject('Error on writing');
+			});
+			ws.on('finish', () => {
+				resolve(200);
+			});
+			ws.end();
+		}
+	});
+	/*if (content.length > 0) {
+		console.log('Write Segment '+ req.url + 'with size ' + content.length);
+		const ws = fs.createWriteStream("data"+req.url, {flags:'a'});
+    	ws.write(content, function(err){
+			if(err){
+				console.log("Error" + err);
+			}else{
+				console.log("Chunk completed");
+			}
+		});
+    	ws.end();
+
+		res.writeHead(200);
+		res.end();
+	}else
+	{
+		res.writeHead(400);
+		res.end();
+	}*/
+	
+};
+
+var deleteAll = function(){
+	return new Promise((resolve, reject) => {
+		files = fs.readdirSync('data'); 
+		if(files.length==0){
+			reportMessage(logLevel, 'Not files inside data folder');
+			reject(500)
+		}else{
+			files.forEach((file) => {
+				const filePath = path.join('data', file);
+				fs.unlinkSync(filePath);
+			});
+			resolve(200);
+		}
+	});
+};
+
+var deleteSegment = function(file){
+	return new Promise((resolve, reject) => {
+		let fileTarget = path.join('data', file);
+		if(fs.existsSync(fileTarget)){
+			fs.unlinkSync(fileTarget);
+			resolve(200);
+		}else{
+			reportMessage(logLevel, `File ${fileTarget} Not Found`);
+			resolve(400);
+		}
+	});
+};
+
 var logLevels = {
   INFO: 0,
   DEBUG_BASIC: 1,
-  DEBUG_MAX: 2
+  DEBUG_MAX: 2,
+  ERROR: 3
 };
 
 var mime_types = {
 	mp4: "video/mp4",
 	m4s: "application/octet-stream",
 	mpd: "application/dash+xml",
+	m3u8: "application/vnd.apple.mpegurl",
+	ts: "video/mp2t"
 };
 
 function pad(n, width, z) {
@@ -68,7 +338,24 @@ function pad(n, width, z) {
 function reportMessage(level, msg) {
 	if (level <= logLevel) {
 		var d = new Date();
-		console.log("["+pad(d.getHours(), 2)+":"+pad(d.getMinutes(), 2)+":"+pad(d.getSeconds(), 2)+"."+pad(d.getMilliseconds(), 3)+"] "+msg);
+		let recordLog = "[" + pad(d.getHours(), 2) + ":" + pad(d.getMinutes(), 2) +
+						":" + pad(d.getSeconds(), 2) + "." + pad(d.getMilliseconds(), 3)+"] " + 
+						msg + "\n";
+		if(incoming_log_file)
+		{
+			fs.appendFile(incoming_log_file, recordLog, (err) => {
+			   
+				if(err)
+				{
+					console.log('Error' + err.code + ':' + err.message);
+				}
+				
+			});	
+		}else
+		{
+			console.log(recordLog);
+		}
+		
 	}
 }
 
@@ -432,11 +719,10 @@ function watchFileListener(curr, prev) {
 	sendFragmentedFile(this.response, this.filename, this);
 }
 
-
-function sendFile(res, filename) {
+function sendFile(filename) {
 	var useChunk = false;
 	if (useChunk) {
-		var file_stream = fs.createReadStream(filename);
+		/*var file_stream = fs.createReadStream(filename);
 		reportMessage(logLevels.DEBUG_BASIC, "Sending file ("+filename+")");
 		file_stream.on("error", function(exception) {
 			console.error("Error reading file ("+filename+")", exception);
@@ -447,91 +733,137 @@ function sendFile(res, filename) {
 		file_stream.on("close", function() {	
 			reportMessage(logLevels.DEBUG_BASIC, "Done sending file ("+filename+")" + "in " + (getTime() - res.startTime) + " ms");
 			res.end();
-		});
+		});*/
 	} else {
 		/* Send the whole file using .end() to avoid using .write() because it uses chunk encoding
 		   Use synchronous reading as they are small files (MPD and init) */
-		var buffer = fs.readFileSync(filename);
-		res.setHeader('Content-Length', buffer.length);
-		res.end(buffer);
+		return fs.readFileSync(filename);
+		
 	}
 }
 
 var onRequest = function(req, res) {
-	var useIndex = false;
-	var notFound = false;
-	var fStat;
-
-	if (incoming_log_file && (req.url.slice(-3) === "mpd")) {
-		fs.appendFile(incoming_log_file, (new Date())+": Incoming request from "+req.socket.remoteAddress+" for URL: "+req.url+" with headers: "+JSON.stringify(req.headers)+"\n");	
-	} 
-	if (quality_log_file) {
-		fs.writeFile(quality_log_file, req.url);	
-	} 
-	var parsed_url = url_parser.parse(req.url, true);
-	var filename = parsed_url.pathname.slice(1);
-	var ext = parsed_url.pathname.slice(-3); 
-	var time = res.startTime = getTime();
-
-	if (allowCors) {
-		res.setHeader("Access-Control-Allow-Origin", "*");
-		res.setHeader("Access-Control-Expose-Headers", "Date");
-	}
-
-	// we send the files as they come, except for segments for which we send fragment by fragment
-	if (filename === "") {
-		filename = "./";
-	}
-	try {	
-		fStat = fs.statSync(filename);
-	} catch(e) {
-		notFound = true;
-	}
-	if (notFound || !fStat.isFile()) {
-		if (fStat && fStat.isDirectory()) {
-			var fIndexStat;
-			try {	
-				fIndexStat = fs.statSync(filename+require('path').sep+'index.html');
-			} catch (e) {
-				notFound = true;
-			}
-			if (fIndexStat) {
-				notFound = false;
-				useIndex = true;
-			}
-		} 
-		if (notFound) {
-			reportMessage(logLevels.INFO, "Request for non existing file: '" + filename + "' at UTC " + time);
-			res.statusCode = 404;
-			res.end("GPAC DASH Server (404): The page you requested "+filename+" was not found");
-			return;
+	if(req.method == 'GET' || req.method=='OPTIONS')
+	{
+		let content;
+		var time = res.startTime = getTime();
+		if(allowCors)
+		{
+			res.setHeader("Access-Control-Allow-Origin", "*");
+			res.setHeader("Access-Control-Expose-Headers", "Date");
 		}
-	}
+		retrieveStreaming(req)
+			.then((obj) => {
+				if(obj.code == 200 && req.method=='OPTIONS')
+				{
+					res.statusCode = obj.code;
+					res.setHeader("Allow", "OPTIONS, GET");
+					res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+					res.end();
+				}else if(obj.code==200 && obj.buffer.length > 0)
+				{
+					res.on('drain', () => {
+						reportMessage(logLevels.INFO, `Transferred Chunk Completed. Get the next one`);
+					});
+					res.on('error', (err) => {
+						reportMessage(logLevels.INFO, `Error sending ${req.url.pathname}: ${err}`);
+					});
+					reportMessage(logLevels.INFO, `Send File ${obj.ext} into Response`);
+					res.statusCode = obj.code;
+					res.setHeader("Content-Type", obj.ext);
+					res.setHeader("Allow", time);
+					
+					if(obj.ext == mime_types['m3u8'] || obj.ext == mime_types['mpd'])
+					{
+						// See RFC-9112
+						reportMessage(logLevels.INFO, 'Send Playlist or MPD File');
+						res.setHeader('Content-Length', obj.buffer.length);
+						
+					}else
+					{
+						reportMessage(logLevels.INFO,  `Send Chunks of ${obj.buffer.length} bytes`);
+						//res.setHeader('Transfer-Encoding', 'chunked');
+					}
+					let responseSent = res.write(obj.buffer);
+					
+					if (responseSent)
+					{
+						reportMessage(logLevels.INFO, `Bytes ${obj.buffer.length} are transferred`);
+					}else{
+						reportMessage(logLevels.INFO, `Bytes ${obj.buffer.length} are queued`);
+					}
+					res.end();
+				}else{
+					reportMessage(logLevels.INFO, `File ${req.url.pathname} EMPTY OR NOT FOUND`);
+					res.writeHead(obj.code);
+					res.end();
+				}
+			})
+			.catch((err) => {
+				if(err==404)
+				{
+					res.statusCode = 404;
+					res.end(`Piece of Streaming ${req.url.pathname} not found`);
+				}
+			});
+	}else if(req.method =='DELETE'){
 
-	reportMessage(logLevels.INFO, "Request for file: '" + filename + "' at UTC " + time) ;
+		let reqPath = url_parser.parse(req.url, true).pathname;
 
-	if (ext === "mpd" || ext === "mp4" || ext === "m4s") {
-		res.statusCode = 200;
-		res.setHeader("Content-Type", mime_types[ext]);
-		res.setHeader("Server-UTC", time);
-		// TODO: Check if we should send MP4 files as fragmented files or not
-		if (ext === "mp4" && sendInitSegmentsFragmented || ext === "m4s" && sendMediaSegmentsFragmented && !filename.includes("init")) {
-			var params = new Parameters(false, state.NONE, res, filename);
-			sendFragmentedFile(res, filename, params);
-			// Sending the final 0-size chunk because the file won't change anymore
-      		if (ext === "mp4") {
+		if(reqPath == '/'){
+			reportMessage(logLevels.INFO, `DELETE all video files`);
+			deleteAll().then((code) => {
+				reportMessage(logLevels.DEBUG_BASIC, `200 OK ${req.url}`);
+				res.writeHead(200);
 				res.end();
-				reportMessage(logLevels.INFO, "file " + filename + " sent in " + (getTime() - time) + " ms");
-      		}
-		} else { 
-			sendFile(res, filename);
+			}).catch((msg) => {
+				reportMessage(logLevel,`Client Error: ${msg}`);
+				res.writeHead(500);
+				res.end();
+			});
+		}else{
+			reportMessage(logLevels.INFO, `DELETE ${reqPath}`);
+			deleteSegment(reqPath).then((code) => {
+				if(code==200){
+					reportMessage(logLevels.DEBUG_BASIC, `200 OK ${req.url}`);
+				}else{
+					reportMessage(logLevels.DEBUG_BASIC, `${code} ${req.url}`);
+				}
+				res.writeHead(code);
+				res.end();
+			}).catch((msg) => {
+				reportMessage(logLevel,`Client Error: ${msg}`);
+				res.writeHead(500);
+				res.end();
+			});
 		}
-	} else {
-		if (useIndex) {
-			sendFile(res, filename+require('path').sep+'index.html');
-		} else {		
-			sendFile(res, filename);
-		}
+	}else
+	{
+    	req.on('data', function(chunk) {
+        	storeStreaming(req, chunk)
+				.then((code) =>{
+					reportMessage(logLevels.DEBUG_BASIC, `200 OK ${req.url}`);
+				})
+				.catch((msg) => {
+					console.log(`Client Error: ${msg}`);
+					res.writeHead(400);
+					res.end()
+				});
+    	});
+
+		req.on('end', function() {
+        	reportMessage(logLevels.DEBUG_BASIC, 'Chunk Completed');
+			res.writeHead(200);
+			res.end();
+    	});
+		
+		req.on('err', function(err) {
+			console.error(err);
+			reportMessage(logLevels.ERROR, err);
+			res.writeHead(400);
+			res.write('BadRequest: Error from client');
+			res.end();
+		});
 	}
 }
 
@@ -568,6 +900,7 @@ process.argv.splice(1).forEach(function(val, index, array) {
 		quality_log_file = array[index + 1];
 	} else if (val === "-incoming-log-file") {
 		incoming_log_file = array[index + 1];
+		console.log("log file: " + incoming_log_file);
 	} else if (val === "-chunks-per-segment") {
 		chunkCount = array[index + 1];
 		console.log("chunkCount: " + chunkCount);		
@@ -582,4 +915,9 @@ if (ipaddr) {
 } else {
 	http.createServer(onRequest).listen(port);
 }
-reportMessage(logLevels.INFO, "Server running on " + (ipaddr ? ipaddr + ":" + port : "port "+ port+ " on all IP")  + " in "+(sendMediaSegmentsFragmented ? "low-latency": "normal")+" mode");
+var initMsg = "Server running on " + (ipaddr ? ipaddr + ":" + port : "port "+ port+ " on all IP ") + "in "
+			+ (process.env.NODE_ENV ==='production' ? + "Production ": "Development ") + "with " 
+			+ (sendMediaSegmentsFragmented ? "low-latency": "normal ")+" mode ";
+reportMessage(logLevels.INFO, initMsg);
+
+module.exports = { storeStreaming, retrieveStreaming, makeChunk, deleteAll };

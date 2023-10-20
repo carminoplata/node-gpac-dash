@@ -1,3 +1,13 @@
+# MPEG DASH Files
 *.mp4
 *.mpd
 *.m4s
+
+# Node Folders
+node_modules
+
+# Data Samples
+data
+
+#Log files
+*.log

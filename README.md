@@ -14,3 +14,9 @@ For a full lldash setup, please refer to this [article](https://bozhang-26963.me
 ## How to use
 
 In order to understand how to use it, please refer to the original repo https://github.com/gpac/node-gpac-dash
+
+## Requirements
+
+* Node 19.8.1
+* Chai
+* Mocha 
